@@ -1,119 +1,133 @@
-use std::fmt::Debug;
-use std::sync::mpsc::channel;
+use std::{
+    collections::HashMap,
+    fmt::{
+        Debug,
+        Display,
+        Formatter,
+    },
+    sync::mpsc::channel,
+};
+
 pub enum Error<'a> {
     Fail {
-        msg: String,
-        tests: Vec<Box<dyn Test + 'a>>,
+        test:   Option<Box<dyn Test + 'a>>,
+        reason: String,
     },
 }
 
-pub trait Test: Debug + Sync + Send {
-    fn test<'t>(self: Box<Self>) -> Result<String, Error<'t>>;
+impl<'a> Debug for Error<'a> {
+    fn fmt(
+        &self,
+        f: &mut Formatter<'_>,
+    ) -> std::fmt::Result {
+        match self {
+            Error::Fail {
+                test,
+                reason,
+            } => {
+                match test {
+                    Some(t) => f.write_str(&format!("Some({})", t)),
+                    None => f.write_str("None"),
+                }?;
+                write!(f, ": {reason}")
+            }
+        }
+    }
 }
 
-#[derive(Debug)]
+pub trait Test: Display + Send {
+    fn test<'t>(self: Box<Self>) -> Result<(), Error<'t>>;
+}
+
 pub struct Suite<'s> {
-    tests: Vec<Box<dyn Test + 's>>,
+    name:  String,
+    tests: HashMap<String, Box<dyn Test + 's>>,
 }
 
 impl<'s> Suite<'s> {
-    pub fn new() -> Self {
-        Self { tests: Vec::new() }
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            tests: HashMap::new(),
+        }
+    }
+
+    pub fn with_name(name: &str) -> Self {
+        Self::new(name.to_string())
     }
 
     pub fn boxed(self) -> Box<Self> {
         Box::new(self)
     }
 
-    pub fn add(&mut self, test: impl Test + 's) {
-        self.tests.push(Box::new(test));
+    fn insert(
+        &mut self,
+        test: Box<dyn Test + 's>,
+    ) -> Option<Box<dyn Test + 's>> {
+        self.tests.insert(test.to_string(), test)
+    }
+
+    pub fn append<T>(
+        self,
+        test: T,
+    ) -> Self
+    where
+        T: Test + 's,
+    {
+        let mut suite = self;
+        if suite.insert(Box::new(test)).is_some() {
+            panic!("tests must have unique names")
+        };
+        suite
+    }
+}
+
+impl<'s> Display for Suite<'s> {
+    fn fmt(
+        &self,
+        f: &mut Formatter<'_>,
+    ) -> std::fmt::Result {
+        write!(f, "{}", self.name)
     }
 }
 
 impl<'s> Test for Suite<'s> {
-    fn test<'t>(mut self: Box<Self>) -> Result<String, Error<'t>> {
+    fn test<'t>(self: Box<Self>) -> Result<(), Error<'t>> {
+        let tests = self.tests;
         let (tx, rx) = channel();
         rayon::scope(|s| {
-            while let Some(test) = self.tests.pop() {
+            for (name, test) in tests {
                 s.spawn(|_| {
-                    tx.send(test.test()).unwrap();
+                    tx.send((name, test.test())).expect("channel disconnected");
                 });
             }
         });
 
-        // Drop the last instance of tx end of the channel.
-        // Otherwise the iterator below will hang indefinitely.
+        // Drop the last instance of tx end of the channel,
+        // otherwise the iterator below will hang indefinitely.
         drop(tx);
 
-        let mut failed = Vec::new();
-        for res in rx {
+        let suite_name = self.name;
+        let mut failed = Suite::new(format!("failed from {suite_name}"));
+        let mut all_good = Some(());
+        for (name, res) in rx {
             match res {
-                Ok(msg) => eprintln!("{msg}"),
-                Err(e) => {
-                    let Error::Fail {
-                        msg,
-                        tests: mut test,
-                    } = e;
-                    eprintln!("FAIL {}", msg);
-                    failed.append(&mut test);
+                Ok(()) => eprintln!("{name} OK"),
+                Err(Error::Fail {
+                    reason,
+                    test,
+                }) => {
+                    all_good = None;
+                    eprintln!("{name} FAILED: {reason}");
+                    if let Some(t) = test {
+                        failed.tests.insert(t.to_string(), t);
+                    }
                 }
             }
         }
-        failed
-            .is_empty()
-            .then_some("OK".to_string())
-            .ok_or(Error::Fail {
-                msg: "FAIL".to_string(),
-                tests: failed,
-            })
-    }
-}
-
-impl<'s> Default for Suite<'s> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<'s, T> Extend<T> for Suite<'s>
-where
-    T: Test + 's,
-{
-    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        for test in iter {
-            self.add(test);
-        }
-    }
-}
-
-impl<'s> Extend<Box<dyn Test + 's>> for Suite<'s> {
-    fn extend<T: IntoIterator<Item = Box<dyn Test + 's>>>(&mut self, iter: T) {
-        self.tests.extend(iter)
-    }
-}
-
-impl<'s, T> FromIterator<T> for Suite<'s>
-where
-    T: Test + 's,
-{
-    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let mut suite = Suite::new();
-        suite.extend(iter);
-        suite
-    }
-}
-
-impl<'s> FromIterator<Box<dyn Test + 's>> for Suite<'s> {
-    fn from_iter<T: IntoIterator<Item = Box<dyn Test + 's>>>(iter: T) -> Self {
-        let mut suite = Suite::new();
-        suite.extend(iter);
-        suite
-    }
-}
-
-impl<'s> From<Error<'s>> for Suite<'s> {
-    fn from(value: Error<'s>) -> Self {
-        let Error::Fail { tests: test, .. } = value;
-        Self::from_iter(test)
+        all_good.ok_or(Error::Fail {
+            test:   (!failed.tests.is_empty()).then_some(Box::new(failed)),
+            reason: format!("failed in {suite_name}"),
+        })
     }
 }
