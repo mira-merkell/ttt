@@ -1,5 +1,4 @@
-use ttt::test::{self, Test};
-use ttt::Suite;
+use ttt::{Suite, Test};
 
 fn add(x: usize, y: usize) -> usize {
     x + y
@@ -9,14 +8,14 @@ fn add(x: usize, y: usize) -> usize {
 struct TestAdd(usize, usize);
 
 impl Test for TestAdd {
-    fn test<'t>(self: Box<Self>) -> Result<(), test::Error<'t>> {
+    fn test<'t>(self: Box<Self>) -> Result<String, ttt::Error<'t>> {
         if add(self.0, self.1) != self.0 + self.1 {
-            Err(test::Error::Fail {
+            Err(ttt::Error::Fail {
                 test: Some(self),
-                msg: "addition",
+                msg: "addition".to_string(),
             })
         } else {
-            Ok(())
+            Ok("OK".to_string())
         }
     }
 }
@@ -25,10 +24,10 @@ impl Test for TestAdd {
 struct TestFail;
 
 impl Test for TestFail {
-    fn test<'t>(self: Box<Self>) -> Result<(), test::Error<'t>> {
-        Err(test::Error::Fail {
-            test: None,
-            msg: "fail",
+    fn test<'t>(self: Box<Self>) -> Result<String, ttt::Error<'t>> {
+        Err(ttt::Error::Fail {
+            test: Some(self),
+            msg: "fail".to_string(),
         })
     }
 }
@@ -43,4 +42,7 @@ fn test_suite() {
 
     let failed = suite.run().unwrap();
     assert_eq!(failed.len(), 1);
+
+    let mut suite = Suite::from_iter(failed);
+    assert!(suite.run().is_some());
 }
