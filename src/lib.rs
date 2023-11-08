@@ -3,7 +3,7 @@ use std::sync::mpsc::channel;
 pub enum Error<'a> {
     Fail {
         msg: String,
-        test: Option<Box<dyn Test + 'a>>,
+        tests: Vec<Box<dyn Test + 'a>>,
     },
 }
 
@@ -11,6 +11,7 @@ pub trait Test: Debug + Sync + Send {
     fn test<'t>(self: Box<Self>) -> Result<String, Error<'t>>;
 }
 
+#[derive(Debug)]
 pub struct Suite<'s> {
     tests: Vec<Box<dyn Test + 's>>,
 }
@@ -20,8 +21,51 @@ impl<'s> Suite<'s> {
         Self { tests: Vec::new() }
     }
 
+    pub fn boxed(self) -> Box<Self> {
+        Box::new(self)
+    }
+
     pub fn add(&mut self, test: impl Test + 's) {
         self.tests.push(Box::new(test));
+    }
+}
+
+impl<'s> Test for Suite<'s> {
+    fn test<'t>(mut self: Box<Self>) -> Result<String, Error<'t>> {
+        let (tx, rx) = channel();
+        rayon::scope(|s| {
+            while let Some(test) = self.tests.pop() {
+                s.spawn(|_| {
+                    tx.send(test.test()).unwrap();
+                });
+            }
+        });
+
+        // Drop the last instance of tx end of the channel.
+        // Otherwise the iterator below will hang indefinitely.
+        drop(tx);
+
+        let mut failed = Vec::new();
+        for res in rx {
+            match res {
+                Ok(msg) => eprintln!("{msg}"),
+                Err(e) => {
+                    let Error::Fail {
+                        msg,
+                        tests: mut test,
+                    } = e;
+                    eprintln!("FAIL {}", msg);
+                    failed.append(&mut test);
+                }
+            }
+        }
+        failed
+            .is_empty()
+            .then_some("OK".to_string())
+            .ok_or(Error::Fail {
+                msg: "FAIL".to_string(),
+                tests: failed,
+            })
     }
 }
 
@@ -67,41 +111,9 @@ impl<'s> FromIterator<Box<dyn Test + 's>> for Suite<'s> {
     }
 }
 
-impl<'s> FromIterator<Error<'s>> for Suite<'s> {
-    fn from_iter<T: IntoIterator<Item = Error<'s>>>(iter: T) -> Self {
-        Suite::from_iter(iter.into_iter().flat_map(|e| {
-            let Error::Fail { test, .. } = e;
-            test
-        }))
-    }
-}
-
-impl<'s> Suite<'s> {
-    pub fn run(&mut self) -> Option<Vec<Error<'s>>> {
-        let (tx, rx) = channel();
-        rayon::scope(|s| {
-            while let Some(test) = self.tests.pop() {
-                s.spawn(|_| {
-                    tx.send(test.test()).unwrap();
-                });
-            }
-        });
-
-        // Drop the last instance of tx end of the channel.
-        // Otherwise the iterator below will hang indefinitely.
-        drop(tx);
-
-        let mut failed = Vec::new();
-        for res in rx {
-            match res {
-                Ok(msg) => eprintln!("{msg}"),
-                Err(e) => {
-                    let Error::Fail { msg, .. } = &e;
-                    eprintln!("FAIL {}", msg);
-                    failed.push(e);
-                }
-            }
-        }
-        (!failed.is_empty()).then_some(failed)
+impl<'s> From<Error<'s>> for Suite<'s> {
+    fn from(value: Error<'s>) -> Self {
+        let Error::Fail { tests: test, .. } = value;
+        Self::from_iter(test)
     }
 }

@@ -11,7 +11,7 @@ impl Test for TestAdd {
     fn test<'t>(self: Box<Self>) -> Result<String, ttt::Error<'t>> {
         if add(self.0, self.1) != self.0 + self.1 {
             Err(ttt::Error::Fail {
-                test: Some(self),
+                tests: vec![self],
                 msg: "addition".to_string(),
             })
         } else {
@@ -26,7 +26,7 @@ struct TestFail;
 impl Test for TestFail {
     fn test<'t>(self: Box<Self>) -> Result<String, ttt::Error<'t>> {
         Err(ttt::Error::Fail {
-            test: Some(self),
+            tests: vec![self],
             msg: "fail".to_string(),
         })
     }
@@ -40,9 +40,8 @@ fn test_suite() {
         suite.add(TestAdd(2 * i, 2 * i))
     }
 
-    let failed = suite.run().unwrap();
-    assert_eq!(failed.len(), 1);
+    let failed = suite.boxed().test().unwrap_err();
 
-    let mut suite = Suite::from_iter(failed);
-    assert!(suite.run().is_some());
+    let suite = Suite::from(failed);
+    assert!(suite.boxed().test().is_err());
 }
